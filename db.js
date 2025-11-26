@@ -7,7 +7,7 @@ export const db = new sqlite3.Database(config.dbFile, (err) => {
 });
 
 db.serialize(() => {
-  // users 表（新增 model 字段可选）
+  // users 表
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       openid TEXT PRIMARY KEY,
@@ -18,37 +18,26 @@ db.serialize(() => {
     )
   `);
 
-  // sessions 表：使用本地时间，并增加 updated_at 的触发器
   db.run(`
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       openid TEXT,
       title TEXT,
-      created_at TEXT DEFAULT (DATETIME('now','localtime')),
-      updated_at TEXT DEFAULT (DATETIME('now','localtime')),
+      created_at TEXT,
+      updated_at TEXT,
       FOREIGN KEY(openid) REFERENCES users(openid)
     )
   `);
 
-  // chat_records 表：使用本地时间
   db.run(`
     CREATE TABLE IF NOT EXISTS chat_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER,
       role TEXT,
       content TEXT,
-      created_at TEXT DEFAULT (DATETIME('now','localtime')),
+      created_at TEXT,
       FOREIGN KEY(session_id) REFERENCES sessions(id)
     )
   `);
-
-  // 为 sessions 创建触发器：在行 UPDATE 时自动刷新 updated_at（本地时间）
-  db.run(`
-    CREATE TRIGGER IF NOT EXISTS sessions_update_timestamp
-    AFTER UPDATE ON sessions
-    FOR EACH ROW
-    BEGIN
-      UPDATE sessions SET updated_at = DATETIME('now','localtime') WHERE id = OLD.id;
-    END;
-  `);
 });
+

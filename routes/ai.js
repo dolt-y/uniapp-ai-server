@@ -10,31 +10,44 @@ const openai = new OpenAI({
   apiKey: config.openaiApiKey,
   baseURL: config.openaiBaseUrl
 });
-
+function getLocalTimeString() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mi = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+}
 // 创建新会话
 function createSession(openid, title = '新会话') {
+  const now = getLocalTimeString();
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO sessions(openid, title) VALUES (?, ?)`,
-      [openid, title],
+      `INSERT INTO sessions (openid, title, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+      [openid, title, now, now],
       function (err) {
-        if (err) reject(err);
-        else resolve(this.lastID);
+        if (err) return reject(err);
+        resolve(this.lastID); // 返回新会话 id
       }
     );
   });
 }
 
+
 // 顺序插入消息
 function insertMessage(sessionId, role, content) {
+  const now = getLocalTimeString();
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO chat_records(session_id, role, content) VALUES (?, ?, ?)`,
-      [sessionId, role, content],
+      `INSERT INTO chat_records(session_id, role, content, created_at) VALUES (?, ?, ?, ?)`,
+      [sessionId, role, content, now],
       (err) => err ? reject(err) : resolve()
     );
   });
 }
+
 
 aiRouter.post('/chat', authMiddleware, async (req, res) => {
   const { messages, stream, sessionId: clientSessionId } = req.body;
@@ -56,7 +69,7 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
         (err, rows) => err ? reject(err) : resolve(rows)
       );
     });
-    const allMessages = messages.concat(historyMessages);
+    const allMessages = historyMessages.concat(messages);
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -148,6 +161,47 @@ aiRouter.get('/sessions/:id/messages', authMiddleware, async (req, res) => {
       res.json({ messages: rows });
     }
   );
+});
+aiRouter.delete('/sessions/:id', authMiddleware, async (req, res) => {
+  const sessionId = req.params.id;
+  const openid = req.user.openid;
+
+  try {
+    // 先检查会话是否存在且属于当前用户
+    const session = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT id FROM sessions WHERE id = ? AND openid = ?`,
+        [sessionId, openid],
+        (err, row) => err ? reject(err) : resolve(row)
+      );
+    });
+
+    if (!session) {
+      return res.status(404).json({ msg: '会话不存在或无权限删除' });
+    }
+
+    // 删除聊天记录
+    await new Promise((resolve, reject) => {
+      db.run(
+        `DELETE FROM chat_records WHERE session_id = ?`,
+        [sessionId],
+        (err) => err ? reject(err) : resolve()
+      );
+    });
+
+    // 删除会话
+    await new Promise((resolve, reject) => {
+      db.run(
+        `DELETE FROM sessions WHERE id = ?`,
+        [sessionId],
+        (err) => err ? reject(err) : resolve()
+      );
+    });
+
+    res.json({ msg: '删除成功', sessionId });
+  } catch (err) {
+    res.status(500).json({ msg: '删除失败', err: err.message });
+  }
 });
 
 aiRouter.get('/models', authMiddleware, async (req, res) => {

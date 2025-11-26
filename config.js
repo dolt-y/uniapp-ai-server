@@ -1,9 +1,12 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 export const config = {
-  wxAppId: '',
-  wxAppSecret: '',
-  jwtSecret: 'YOUR_JWT_SECRET',
-  port: 3000,
-  dbFile: './wechat-mini.db',
-  openaiApiKey: '',
-  openaiBaseUrl: 'https://api.deepseek.com'
+  wxAppId: process.env.WX_APP_ID,
+  wxAppSecret: process.env.WX_APP_SECRET,
+  jwtSecret: process.env.JWT_SECRET,
+  port: process.env.PORT || 3000,
+  dbFile: process.env.DB_FILE,
+  openaiApiKey: process.env.OPENAI_API_KEY,
+  openaiBaseUrl: process.env.OPENAI_BASE_URL
 };
