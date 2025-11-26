@@ -49,7 +49,14 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
     if (!sessionId) {
       sessionId = await createSession(openid, messages[0].content.slice(0, 10));
     }
-
+    const historyMessages = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT role, content FROM chat_records WHERE session_id = ? ORDER BY created_at ASC`,
+        [sessionId],
+        (err, rows) => err ? reject(err) : resolve(rows)
+      );
+    });
+    const allMessages = messages.concat(historyMessages);
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -67,7 +74,7 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
       }
 
       const completion = await openai.chat.completions.create(
-        { model: 'deepseek-chat', messages, stream: true },
+        { model: 'deepseek-chat', messages: [...allMessages], stream: true },
         { responseType: 'stream' }
       );
 
@@ -92,7 +99,7 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
     // 非流模式
     const completion = await openai.chat.completions.create({
       model: 'deepseek-chat',
-      messages
+      messages: [...allMessages]
     });
     const reply = completion.choices[0].message;
     console.log('reply:', reply)
