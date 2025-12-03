@@ -110,13 +110,17 @@ function setupSSEResponse(res) {
 }
 
 // 调用 AI 模型（支持流式和非流式）
-async function callAI(messages, stream = false) {
+async function callAI(messages, stream = false, models = 'deepseek-chat') {
+  console.log('Using model:', models);
   const completion = await openai.chat.completions.create(
     {
-      model: 'deepseek-reasoner',
+      model: models,
       messages,
       stream,
-      extra_body: { thinking: { type: "enabled" } }
+      enable_thinking: true,
+      stream_options: {
+        include_usage: true
+      },
     },
     stream ? { responseType: 'stream' } : {}
   );
@@ -168,7 +172,7 @@ async function handleBufferedStreamResponse(completion, emitFn, options = {}) {
 
 // 聊天接口
 aiRouter.post('/chat', authMiddleware, async (req, res) => {
-  const { messages, stream, sessionId: clientSessionId } = req.body;
+  const { messages, model, stream, sessionId: clientSessionId } = req.body;
   const openid = req.user.openid;
 
   if (!messages || !Array.isArray(messages) || !messages.every(msg => msg.role && msg.content && typeof msg.content === 'string')) {
@@ -179,11 +183,9 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
     // 获取或创建会话
     let sessionId = clientSessionId;
     if (!sessionId) {
+      console.log('Creating new session for user:', openid);
       sessionId = await createSession(openid, messages[0].content);
-    } else {
-      // await updateSession(sessionId, messages[0].content);
     }
-
     // 获取会话历史
     const historyMessages = await getSessionHistory(sessionId);
     const allMessages = historyMessages.concat(messages);
@@ -201,7 +203,7 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
       });
 
       // 调用 AI 并流式返回
-      const completion = await callAI(allMessages, true);
+      const completion = await callAI(allMessages, true, model);
       const assistantContent = await handleBufferedStreamResponse(completion, async (chunk) => {
         console.log('assistant:', chunk);
         if (isClientConnected) {
@@ -215,14 +217,14 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
         await insertMessage(sessionId, 'assistant', assistantContent);
       }
 
-      // 发送结束事件
-      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      // 发送结束事件（包含 sessionId 便于前端保存）
+      res.write(`data: ${JSON.stringify({ type: 'done', sessionId })}\n\n`);
       res.end();
       return;
     }
 
     // 非流模式
-    const completion = await callAI(allMessages);
+    const completion = await callAI(allMessages, false, model);
     const reply = completion.choices[0].message;
     await insertMessage(sessionId, 'assistant', reply.content);
 
@@ -360,7 +362,7 @@ aiRouter.get('/models', authMiddleware, async (req, res) => {
 // 点赞消息
 aiRouter.post('/messages/:id/like', authMiddleware, async (req, res) => {
   const messageId = req.params.id;
-
+  console.log(messageId)
   try {
     const message = await dbGet(
       `SELECT id, liked FROM chat_records WHERE id = ?`,
@@ -368,7 +370,7 @@ aiRouter.post('/messages/:id/like', authMiddleware, async (req, res) => {
     );
 
     if (!message) {
-      return res.status(404).json({ msg: '消息不存在' });
+      return res.status(500).json({ msg: '消息不存在' });
     }
 
     const newLikedStatus = message.liked ? 0 : 1;
@@ -386,7 +388,7 @@ aiRouter.post('/messages/:id/like', authMiddleware, async (req, res) => {
 // 重新生成消息
 aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
   const messageId = req.params.id;
-  const { stream } = req.body;
+  const { stream, model } = req.body;
   const openid = req.user.openid;
 
   try {
@@ -425,7 +427,7 @@ aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
       let isClientConnected = true;
       req.on('close', () => { isClientConnected = false; });
 
-      const completion = await callAI(messages, true);
+      const completion = await callAI(messages, true, model);
       const assistantContent = await handleBufferedStreamResponse(completion, async (chunk) => {
         if (isClientConnected) {
           res.write(`data: ${JSON.stringify({ type: 'delta', text: chunk })}\n\n`);
@@ -436,13 +438,14 @@ aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
         await updateMessage(messageId, assistantContent);
       }
 
-      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      // 发送结束事件（包含 sessionId 便于前端保存）
+      res.write(`data: ${JSON.stringify({ type: 'done', sessionId })}\n\n`);
       res.end();
       return;
     }
 
     // 非流模式
-    const completion = await callAI(messages);
+    const completion = await callAI(messages, false, model);
     const reply = completion.choices[0].message;
     await updateMessage(messageId, reply.content);
     res.json({ messageId, newContent: reply.content });
