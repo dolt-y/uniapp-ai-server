@@ -7,7 +7,6 @@ export const db = new sqlite3.Database(config.dbFile, (err) => {
 });
 
 db.serialize(() => {
-  // users 表
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       openid TEXT PRIMARY KEY,
@@ -36,6 +35,7 @@ db.serialize(() => {
       role TEXT,
       content TEXT,
       created_at TEXT,
+      liked INTEGER DEFAULT 0,
       FOREIGN KEY(session_id) REFERENCES sessions(id)
     )
   `);

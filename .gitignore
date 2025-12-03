@@ -21,3 +21,4 @@ dist
 *.njsproj
 *.sln
 *.sw?
+wechat-mini.db

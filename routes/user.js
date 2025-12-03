@@ -30,7 +30,7 @@ userRouter.post('/login', async (req, res) => {
     const token = jwt.sign(
       { openid },
       config.jwtSecret,
-      { expiresIn: '7d' }
+      { expiresIn: '1d' }
     );
 
     db.run(`
