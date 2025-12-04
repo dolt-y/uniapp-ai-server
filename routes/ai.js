@@ -2,7 +2,7 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.js';
 import OpenAI from 'openai';
 import { config } from '../config.js';
-import { db } from '../db.js';
+import { dbRun, dbAll, dbGet } from '../db.js';
 
 export const aiRouter = express.Router();
 
@@ -24,34 +24,6 @@ function getLocalTimeString() {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
 }
 
-// 数据库操作 Promise 化
-function dbRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve({ lastID: this.lastID, changes: this.changes });
-    });
-  });
-}
-
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
-}
-
-function dbAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
-}
-
 // 会话操作
 function createSession(openid, title = '新会话') {
   const now = getLocalTimeString();
@@ -61,28 +33,20 @@ function createSession(openid, title = '新会话') {
   ).then(result => result.lastID);
 }
 
-function updateSession(sessionId, newTitle) {
-  const now = getLocalTimeString();
-  return dbRun(
-    `UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`,
-    [newTitle, now, sessionId]
-  );
-}
-
 // 消息操作
-function insertMessage(sessionId, role, content) {
+function insertMessage(sessionId, role, content, reasoning_content = null) {
   const now = getLocalTimeString();
   return dbRun(
-    `INSERT INTO chat_records(session_id, role, content, created_at) VALUES (?, ?, ?, ?)`,
-    [sessionId, role, content, now]
+    `INSERT INTO chat_records(session_id, role, content, reasoning_content, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [sessionId, role, content, reasoning_content, now]
   );
 }
 
-function updateMessage(messageId, content) {
+function updateMessage(messageId, content, reasoning_content = null) {
   const now = getLocalTimeString();
   return dbRun(
-    `UPDATE chat_records SET content = ?, created_at = ? WHERE id = ?`,
-    [content, now, messageId]
+    `UPDATE chat_records SET content = ?, reasoning_content = ?, created_at = ? WHERE id = ?`,
+    [content, reasoning_content, now, messageId]
   );
 }
 
@@ -111,16 +75,11 @@ function setupSSEResponse(res) {
 
 // 调用 AI 模型（支持流式和非流式）
 async function callAI(messages, stream = false, models = 'deepseek-chat') {
-  console.log('Using model:', models);
   const completion = await openai.chat.completions.create(
     {
       model: models,
       messages,
       stream,
-      enable_thinking: true,
-      stream_options: {
-        include_usage: true
-      },
     },
     stream ? { responseType: 'stream' } : {}
   );
@@ -133,26 +92,45 @@ async function handleBufferedStreamResponse(completion, emitFn, options = {}) {
   const minChars = options.minChars || 40; // 达到最小长度就发送
   const maxWait = options.maxWait || 200; // 毫秒，超过该时间也会发送（防止长时间等待）
   const boundaryRegex = options.boundaryRegex || /\n\n|[。！？.!?]\s*$/; // 遇到段落或句尾则发送
+  const emitThinking = options.emitThinking !== false; // 是否将思考链作为独立事件发出，默认 true
 
   let buffer = '';
   let lastEmit = Date.now();
   let full = '';
-
   try {
     for await (const event of completion) {
-      const text = event.choices?.[0]?.delta?.content;
-      if (!text) continue;
-      buffer += text;
-      full += text;
+      const delta = event.choices?.[0]?.delta || {};
 
+      // 处理常规文本片段
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        buffer += delta.content;
+        full += delta.content;
+      }
+
+      // 如果返回了思考链（deepseek 风格，字段名为 reasoning_content），优先将当前 buffer 刷出，再发送 thinking 事件
+      if (emitThinking && delta.reasoning_content) {
+        if (buffer.length > 0) {
+          await emitFn({ type: 'delta', text: buffer });
+          buffer = '';
+          lastEmit = Date.now();
+        }
+
+        // 直接发送 thinking 对象
+        try {
+          await emitFn({ type: 'thinking', thinking: delta.reasoning_content });
+        } catch (e) {
+          console.error('发送 thinking 事件失败:', e);
+        }
+      }
+
+      // 决定是否按语义边界或长度或时间发送当前 buffer
       const now = Date.now();
       const shouldByLength = buffer.length >= minChars;
       const shouldByBoundary = boundaryRegex.test(buffer);
       const shouldByTime = (now - lastEmit) >= maxWait && buffer.length > 0;
 
       if (shouldByBoundary || shouldByLength || shouldByTime) {
-        // 发送当前 buffer
-        await emitFn(buffer);
+        await emitFn({ type: 'delta', text: buffer });
         buffer = '';
         lastEmit = Date.now();
       }
@@ -163,7 +141,7 @@ async function handleBufferedStreamResponse(completion, emitFn, options = {}) {
 
   // 流结束前将剩余 buffer 发出
   if (buffer.length > 0) {
-    await emitFn(buffer);
+    await emitFn({ type: 'delta', text: buffer });
   }
   return full;
 }
@@ -183,7 +161,6 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
     // 获取或创建会话
     let sessionId = clientSessionId;
     if (!sessionId) {
-      console.log('Creating new session for user:', openid);
       sessionId = await createSession(openid, messages[0].content);
     }
     // 获取会话历史
@@ -203,21 +180,26 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
       });
 
       // 调用 AI 并流式返回
+      let lastReasoningContent = '';
       const completion = await callAI(allMessages, true, model);
-      const assistantContent = await handleBufferedStreamResponse(completion, async (chunk) => {
-        console.log('assistant:', chunk);
-        if (isClientConnected) {
-          // 以 JSON 事件发送合并后的片段，便于前端按事件重组与 markdown 渲染
-          res.write(`data: ${JSON.stringify({ type: 'delta', text: chunk })}\n\n`);
+      const assistantContent = await handleBufferedStreamResponse(completion, async (evt) => {
+        if (!isClientConnected) return;
+        if (evt && evt.type === 'delta') {
+          res.write(`data: ${JSON.stringify(evt)}\n\n`);
+        } else if (evt && evt.type === 'thinking') {
+          lastReasoningContent += evt.thinking;
+          res.write(`data: ${JSON.stringify({ type: 'thinking', thinking: evt.thinking })}\n\n`);
+        } else if (evt && evt.type === 'done') {
+          res.write(`data: ${JSON.stringify(evt)}\n\n`);
         }
-      }, { minChars: 60, maxWait: 180 });
+      }, { minChars: 60, maxWait: 180, emitThinking: true });
 
       // 保存 AI 回复
       if (assistantContent) {
-        await insertMessage(sessionId, 'assistant', assistantContent);
+        await insertMessage(sessionId, 'assistant', assistantContent, lastReasoningContent || null);
       }
 
-      // 发送结束事件（包含 sessionId 便于前端保存）
+      // 发送结束事件，并且返回 sessionId 便于前端保存
       res.write(`data: ${JSON.stringify({ type: 'done', sessionId })}\n\n`);
       res.end();
       return;
@@ -226,7 +208,7 @@ aiRouter.post('/chat', authMiddleware, async (req, res) => {
     // 非流模式
     const completion = await callAI(allMessages, false, model);
     const reply = completion.choices[0].message;
-    await insertMessage(sessionId, 'assistant', reply.content);
+    await insertMessage(sessionId, 'assistant', reply.content, null);
 
     res.json({ sessionId, reply });
   } catch (err) {
@@ -252,7 +234,7 @@ aiRouter.post('/chat-mock', authMiddleware, async (req, res) => {
   setupSSEResponse(res);
 
   let isClientConnected = true;
-  // req.on('close', () => { isClientConnected = false; });
+  req.on('close', () => { isClientConnected = false; });
 
   // Mock 数据
   const mockRow = await dbGet(
@@ -271,27 +253,29 @@ aiRouter.post('/chat-mock', authMiddleware, async (req, res) => {
   }
 
   try {
-    await handleBufferedStreamResponse(mockCompletion(), async (chunk) => {
-      if (isClientConnected) {
-        res.write(`data: ${JSON.stringify({ type: 'delta', text: chunk })}\n\n`);
+    await handleBufferedStreamResponse(mockCompletion(), async (evt) => {
+      if (!isClientConnected) return;
+      if (evt && evt.type === 'delta') {
+        res.write(`data: ${JSON.stringify(evt)}\n\n`);
+      } else if (evt && evt.type === 'thinking') {
+        res.write(`data: ${JSON.stringify({ type: 'thinking', thinking: evt.thinking })}\n\n`);
       }
     }, { minChars: 60, maxWait: 180 });
   } catch (err) {
     console.error('mock buffered SSE 错误:', err);
     // 降级：直接逐片段发送，确保前端能收到内容
     try {
-      for (const chunk of chunks) {
+      for (const c of chunks) {
         if (!isClientConnected) break;
-        res.write(`data: ${JSON.stringify({ type: 'delta', text: chunk })}\n\n`);
-        // 保持与 mockCompletion 中相近的发送速率
+        res.write(`data: ${JSON.stringify({ type: 'delta', text: c })}\n\n`);
         await new Promise(r => setTimeout(r, 40 + Math.random() * 80));
       }
     } catch (err2) {
       console.error('mock fallback SSE 错误:', err2);
     }
   }
-
-  res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+  // 结束事件，包含 sessionId 便于前端保存
+  res.write(`data: ${JSON.stringify({ type: 'done', sessionId })}\n\n`);
   res.end();
 });
 
@@ -316,7 +300,7 @@ aiRouter.get('/sessions/:id/messages', authMiddleware, async (req, res) => {
 
   try {
     const messages = await dbAll(
-      `SELECT id, role, content, created_at, liked FROM chat_records WHERE session_id = ? ORDER BY created_at ASC`,
+      `SELECT id, role, content, reasoning_content , created_at, liked FROM chat_records WHERE session_id = ? ORDER BY created_at ASC`,
       [sessionId]
     );
     res.json({ messages });
@@ -362,7 +346,6 @@ aiRouter.get('/models', authMiddleware, async (req, res) => {
 // 点赞消息
 aiRouter.post('/messages/:id/like', authMiddleware, async (req, res) => {
   const messageId = req.params.id;
-  console.log(messageId)
   try {
     const message = await dbGet(
       `SELECT id, liked FROM chat_records WHERE id = ?`,
@@ -428,17 +411,20 @@ aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
       req.on('close', () => { isClientConnected = false; });
 
       const completion = await callAI(messages, true, model);
-      const assistantContent = await handleBufferedStreamResponse(completion, async (chunk) => {
-        if (isClientConnected) {
-          res.write(`data: ${JSON.stringify({ type: 'delta', text: chunk })}\n\n`);
+      let lastReasoningContent = null;
+      const assistantContent = await handleBufferedStreamResponse(completion, async (evt) => {
+        if (!isClientConnected) return;
+        if (evt && evt.type === 'delta') {
+          res.write(`data: ${JSON.stringify(evt)}\n\n`);
+        } else if (evt && evt.type === 'thinking') {
+          lastReasoningContent = evt.thinking;
+          res.write(`data: ${JSON.stringify({ type: 'thinking', thinking: evt.thinking })}\n\n`);
         }
-      }, { minChars: 60, maxWait: 180 });
+      }, { minChars: 60, maxWait: 180, emitThinking: true });
 
       if (assistantContent) {
-        await updateMessage(messageId, assistantContent);
+        await updateMessage(messageId, assistantContent, lastReasoningContent);
       }
-
-      // 发送结束事件（包含 sessionId 便于前端保存）
       res.write(`data: ${JSON.stringify({ type: 'done', sessionId })}\n\n`);
       res.end();
       return;
@@ -447,7 +433,7 @@ aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
     // 非流模式
     const completion = await callAI(messages, false, model);
     const reply = completion.choices[0].message;
-    await updateMessage(messageId, reply.content);
+    await updateMessage(messageId, reply.content, null);
     res.json({ messageId, newContent: reply.content });
   } catch (err) {
     res.status(500).json({ msg: '重新生成失败', err: err.message });
