@@ -1,3 +1,8 @@
+/*
+ * @Description: 
+ * @Author: wen.yao
+ * @LastEditTime: 2025-12-05 16:47:22
+ */
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 

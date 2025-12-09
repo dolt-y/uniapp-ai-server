@@ -3,6 +3,8 @@ import { authMiddleware } from '../middleware/auth.js';
 import OpenAI from 'openai';
 import { config } from '../config.js';
 import { dbRun, dbAll, dbGet } from '../db.js';
+import { upload } from '../middleware/upload.js';
+import { Whisper } from '../middleware/whisper.js';
 
 export const aiRouter = express.Router();
 
@@ -437,5 +439,38 @@ aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
     res.json({ messageId, newContent: reply.content });
   } catch (err) {
     res.status(500).json({ msg: '重新生成失败', err: err.message });
+  }
+});
+
+// 语音转文本接口
+aiRouter.post('/speech-to-text', upload.single('audio'), async (req, res) => {
+  
+  try {
+    if (!req.file) {
+      return res.status(400).json({ msg: '未提供音频文件' });
+    }
+    
+    // // 将音频文件保存到临时位置
+    // const tempFilePath = `/tmp/audio_${Date.now()}.wav`;
+    // await fs.writeFile(tempFilePath, req.file.buffer);
+    
+    // // 使用本地Whisper模型进行语音识别
+    // const transcription = await whisper(tempFilePath, {
+    //   modelName: 'base', // 可选：tiny, base, small, medium, large
+    //   whisperOptions: {
+    //     language: 'zh' // 指定识别语言为中文
+    //   }
+    // });
+    
+    // // 删除临时文件
+    // await fs.unlink(tempFilePath);
+    
+    res.json({
+      msg: '语音识别成功',
+      text: transcription.text
+    });
+  } catch (err) {
+    console.error('语音识别失败:', err);
+    res.status(500).json({ msg: '语音识别失败', err: err.message });
   }
 });
