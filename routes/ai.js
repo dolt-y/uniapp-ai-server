@@ -5,7 +5,8 @@ import { config } from '../config.js';
 import { dbRun, dbAll, dbGet } from '../db.js';
 import { upload } from '../middleware/upload.js';
 import { Whisper } from '../middleware/whisper.js';
-
+import fs from "fs/promises";
+import path from 'path';
 export const aiRouter = express.Router();
 
 const openai = new OpenAI({
@@ -443,31 +444,37 @@ aiRouter.post('/messages/:id/regenerate', authMiddleware, async (req, res) => {
 });
 
 // 语音转文本接口
-aiRouter.post('/speech-to-text', upload.single('audio'), async (req, res) => {
-  
+aiRouter.post('/speech-to-text', authMiddleware, upload.single('audio'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ msg: '未提供音频文件' });
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ msg: '未提供音频文件或文件为空' });
     }
-    
-    // // 将音频文件保存到临时位置
-    // const tempFilePath = `/tmp/audio_${Date.now()}.wav`;
-    // await fs.writeFile(tempFilePath, req.file.buffer);
-    
-    // // 使用本地Whisper模型进行语音识别
-    // const transcription = await whisper(tempFilePath, {
-    //   modelName: 'base', // 可选：tiny, base, small, medium, large
-    //   whisperOptions: {
-    //     language: 'zh' // 指定识别语言为中文
-    //   }
-    // });
-    
-    // // 删除临时文件
-    // await fs.unlink(tempFilePath);
-    
-    res.json({
+
+    // 临时文件路径（确保目录存在）
+    const tempDir = path.resolve('./temp'); // 当前项目 temp 文件夹
+    await fs.mkdir(tempDir, { recursive: true });
+
+    const tempFilePath = path.join(tempDir, `audio_${Date.now()}.wav`);
+    console.log('tempFilePath:', tempFilePath);
+    console.log('req.file:', req.file);
+
+    // 写入文件
+    await fs.writeFile(tempFilePath, req.file.buffer);
+    console.log('文件写入成功');
+
+    // 调用 Whisper 转写
+    const whisper = new Whisper(
+      '/Users/mac/Downloads/Front-project/learn/wechat-ai-backend/whisper.cpp',
+      'ggml-tiny.bin'
+    );
+    const text = await whisper.transcribe(tempFilePath, 'zh');
+
+    // 删除临时文件
+    await fs.unlink(tempFilePath);
+
+    return res.json({
       msg: '语音识别成功',
-      text: transcription.text
+      text
     });
   } catch (err) {
     console.error('语音识别失败:', err);
